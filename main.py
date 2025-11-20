@@ -5,9 +5,13 @@ Usage:
                    --output_dir outputs/kaggle \
                    --gt_dir path/to/dataset/ClearImages
 
+Naming convention:
+    - Hazy images: XX_hazy.png
+    - Ground truth: XX_GT.png
+
 All dehazed results are written under --output_dir using the same relative
-structure as the hazy inputs. If --gt_dir is provided and filenames match,
-PSNR and SSIM are reported per image and aggregated in a CSV.
+structure as the hazy inputs. If --gt_dir is provided, the code automatically
+converts hazy filenames to GT filenames and reports PSNR/SSIM per image in a CSV.
 """
 
 from __future__ import annotations
@@ -51,12 +55,22 @@ def parse_args() -> argparse.Namespace:
         help="CSV path for per-image metrics (only used if gt_dir is set).",
     )
     parser.add_argument("--patch", type=int, default=15)
-    parser.add_argument("--omega", type=float, default=0.95)
-    parser.add_argument("--t0", type=float, default=0.1)
+    parser.add_argument("--omega", type=float, default=0.95, help="Haze retention factor.")
+    parser.add_argument("--t0", type=float, default=0.06, help="Transmission floor.")
     parser.add_argument("--top_percent", type=float, default=0.001)
-    parser.add_argument("--guided_radius", type=int, default=40)
+    parser.add_argument("--guided_radius", type=int, default=12, help="Guided filter radius.")
     parser.add_argument("--guided_eps", type=float, default=1e-3)
     parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument(
+        "--no-perchannel",
+        action="store_true",
+        help="Disable per-channel refinement.",
+    )
+    parser.add_argument(
+        "--no-grayworld",
+        action="store_true",
+        help="Disable Gray-World white balance.",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +91,25 @@ def load_image(path: Path) -> np.ndarray:
     if image is None:
         raise ValueError(f"Failed to read image: {path}")
     return image
+
+
+def hazy_to_gt_path(hazy_path: Path, hazy_dir: Path, gt_dir: Path) -> Path:
+    """Convert hazy filename (XX_hazy.png) to ground truth filename (XX_GT.png).
+    
+    Preserves relative directory structure from hazy_dir to gt_dir.
+    """
+    # Get relative path from hazy_dir
+    rel_path = hazy_path.relative_to(hazy_dir)
+    
+    # Replace _hazy with _GT in the filename
+    if "_hazy" in rel_path.name:
+        gt_name = rel_path.name.replace("_hazy", "_GT")
+    else:
+        # Fallback: if pattern doesn't match, try to construct from stem
+        gt_name = rel_path.stem.replace("_hazy", "_GT") + rel_path.suffix
+    
+    # Preserve relative directory structure
+    return gt_dir / rel_path.parent / gt_name
 
 
 def compute_metrics(
@@ -106,6 +139,8 @@ def main() -> None:
         guided_radius=args.guided_radius,
         guided_eps=args.guided_eps,
         depth_beta=args.beta,
+        use_perchannel_refinement=not args.no_perchannel,
+        apply_gray_world=not args.no_grayworld,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -121,7 +156,7 @@ def main() -> None:
         cv2.imwrite(str(out_path), (recovered * 255).astype(np.uint8))
 
         if args.gt_dir:
-            gt_path = args.gt_dir / rel_path
+            gt_path = hazy_to_gt_path(hazy_path, args.hazy_dir, args.gt_dir)
             if gt_path.exists():
                 gt_img = load_image(gt_path)
                 psnr_val, ssim_val = compute_metrics((recovered * 255).astype(np.uint8), gt_img)
@@ -129,7 +164,7 @@ def main() -> None:
                     {"image": str(rel_path).replace("\\", "/"), "psnr": psnr_val, "ssim": ssim_val}
                 )
             else:
-                print(f"[WARN] Missing ground-truth for {rel_path}; skipping metrics.")
+                print(f"[WARN] Missing ground-truth for {hazy_path.name} (expected {gt_path}); skipping metrics.")
 
     if metrics_rows and args.gt_dir:
         args.csv_path.parent.mkdir(parents=True, exist_ok=True)

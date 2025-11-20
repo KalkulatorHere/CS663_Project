@@ -72,12 +72,16 @@ def _guided_filter(
 @dataclass
 class DarkChannelPriorDehazer:
     patch_size: int = 15
-    omega: float = 0.95
-    transmission_floor: float = 0.1
+    omega: float = 0.95  # Improved default: stronger haze removal
+    transmission_floor: float = 0.06  # Improved default: more aggressive dehazing
     top_percent: float = 0.001
-    guided_radius: int = 40
+    guided_radius: int = 12  # Improved default: smaller window for less blur
     guided_eps: float = 1e-3
     depth_beta: float = 1.0
+    # Refinement method: True = per-channel (better edges), False = grayscale (faster)
+    use_perchannel_refinement: bool = True
+    # White balance: apply Gray-World to reduce color cast
+    apply_gray_world: bool = True
     # Post-processing parameters for brightness/sharpness (edit constants above)
     gamma: float = GAMMA
     exposure_gain: float = EXPOSURE_GAIN
@@ -94,16 +98,23 @@ class DarkChannelPriorDehazer:
     def _estimate_atmospheric_light(
         self, image: np.ndarray, dark_channel: np.ndarray
     ) -> np.ndarray:
-        """Select brightest input pixel among top dark-channel candidates."""
+        """Select brightest input pixel among top dark-channel candidates.
+        
+        Uses max-channel brightness metric (more conservative than sum) to avoid
+        picking colored bright objects, reducing color cast.
+        """
         flat_dark = dark_channel.ravel()
         num_pixels = flat_dark.size
         num_top = max(int(num_pixels * self.top_percent), 1)
         top_indices = np.argpartition(flat_dark, -num_top)[-num_top:]
         flat_image = image.reshape(-1, 3)
         candidate_pixels = flat_image[top_indices]
-        brightness = candidate_pixels.sum(axis=1)
+        # Conservative brightness metric: max channel (prevents picking colored objects)
+        brightness = candidate_pixels.max(axis=1)
         best_idx = top_indices[np.argmax(brightness)]
-        return flat_image[best_idx]
+        A = flat_image[best_idx].astype(np.float32)
+        # Clamp to avoid divide-by-zero in transmission estimation
+        return np.maximum(A, 1e-6)
 
     def _estimate_transmission(
         self, image: np.ndarray, atmospheric_light: np.ndarray
@@ -117,12 +128,29 @@ class DarkChannelPriorDehazer:
     def _refine_transmission(
         self, image: np.ndarray, coarse_t: np.ndarray
     ) -> np.ndarray:
-        """Refine transmission using guided filtering."""
+        """Refine transmission using guided filtering (grayscale guide)."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         refined = _guided_filter(
             gray, coarse_t, self.guided_radius, self.guided_eps
         )
         return np.clip(refined, 0.0, 1.0)
+
+    def _refine_transmission_perchannel(
+        self, image: np.ndarray, coarse_t: np.ndarray
+    ) -> np.ndarray:
+        """Refine transmission using per-channel guided filtering.
+        
+        Uses each color channel as a guide and averages the results.
+        Preserves chromatic edges better than grayscale guide, but may
+        introduce slight color noise/mottling.
+        """
+        refined_sum = np.zeros_like(coarse_t, dtype=np.float32)
+        for c in range(3):
+            guide = image[:, :, c].astype(np.float32)
+            refined_sum += _guided_filter(
+                guide, coarse_t.astype(np.float32), self.guided_radius, self.guided_eps
+            )
+        return np.clip(refined_sum / 3.0, 0.0, 1.0)
 
     def _recover_radiance(
         self, image: np.ndarray, transmission: np.ndarray, atmospheric_light: np.ndarray
@@ -138,6 +166,15 @@ class DarkChannelPriorDehazer:
         depth = -np.log(np.clip(transmission, 1e-6, 1.0)) / beta
         depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
         return depth_norm
+
+    def _gray_world_balance(self, image: np.ndarray) -> np.ndarray:
+        """Apply Gray-World white balance to reduce residual color cast.
+        
+        Assumes average color should be neutral gray, scales channels accordingly.
+        """
+        avg = image.mean(axis=(0, 1))
+        scale = avg.mean() / (avg + 1e-8)
+        return np.clip(image * scale, 0.0, 1.0)
 
     def _apply_post_processing(self, image: np.ndarray) -> np.ndarray:
         """Apply gamma correction, exposure adjustment, and optional sharpening."""
@@ -170,8 +207,18 @@ class DarkChannelPriorDehazer:
         dark = self._dark_channel(image)
         atmospheric_light = self._estimate_atmospheric_light(image, dark)
         coarse_transmission = self._estimate_transmission(image, atmospheric_light)
-        refined_transmission = self._refine_transmission(image, coarse_transmission)
+        
+        # Use per-channel refinement if enabled (better edge preservation)
+        if self.use_perchannel_refinement:
+            refined_transmission = self._refine_transmission_perchannel(image, coarse_transmission)
+        else:
+            refined_transmission = self._refine_transmission(image, coarse_transmission)
+        
         recovered = self._recover_radiance(image, refined_transmission, atmospheric_light)
+        
+        # Apply Gray-World white balance to reduce color cast
+        if self.apply_gray_world:
+            recovered = self._gray_world_balance(recovered)
         
         # Apply post-processing (gamma, exposure, sharpening)
         recovered = self._apply_post_processing(recovered)
@@ -210,17 +257,36 @@ def parse_args() -> argparse.Namespace:
         help="Output path for refined transmission map.",
     )
     parser.add_argument("--patch", type=int, default=15, help="Patch size for dark channel.")
-    parser.add_argument("--omega", type=float, default=0.88, help="Haze retention factor.")
-    parser.add_argument("--t0", type=float, default=0.06, help="Transmission floor.")
+    parser.add_argument(
+        "--omega", type=float, default=0.95, help="Haze retention factor (higher = more haze retained)."
+    )
+    parser.add_argument(
+        "--t0", type=float, default=0.06, help="Transmission floor (lower = more aggressive dehazing)."
+    )
     parser.add_argument(
         "--top_percent",
         type=float,
         default=0.001,
         help="Fraction of brightest dark-channel pixels for atmospheric light.",
     )
-    parser.add_argument("--guided_radius", type=int, default=40, help="Guided filter radius.")
+    parser.add_argument(
+        "--guided_radius",
+        type=int,
+        default=12,
+        help="Guided filter radius (smaller = sharper, less blur).",
+    )
     parser.add_argument("--guided_eps", type=float, default=1e-3, help="Guided filter epsilon.")
     parser.add_argument("--beta", type=float, default=1.0, help="Depth scaling parameter β.")
+    parser.add_argument(
+        "--no-perchannel",
+        action="store_true",
+        help="Disable per-channel refinement (use grayscale guide instead).",
+    )
+    parser.add_argument(
+        "--no-grayworld",
+        action="store_true",
+        help="Disable Gray-World white balance.",
+    )
     return parser.parse_args()
 
 
@@ -238,6 +304,8 @@ def main() -> None:
         guided_radius=args.guided_radius,
         guided_eps=args.guided_eps,
         depth_beta=args.beta,
+        use_perchannel_refinement=not args.no_perchannel,
+        apply_gray_world=not args.no_grayworld,
     )
 
     recovered, transmission, depth = dehazer.dehaze(image)
