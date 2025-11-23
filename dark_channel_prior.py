@@ -1,18 +1,3 @@
-"""Dark Channel Prior single-image dehazing implementation (BGR pipeline).
-
-This module implements the full pipeline described in
-“Single Image Haze Removal Using Dark Channel Prior”
-by Kaiming He, Jian Sun, and Xiaoou Tang (CVPR 2009).
-
-The core steps follow the mathematics of the paper:
-1. Atmospheric scattering model: I(x) = J(x) t(x) + A (1 - t(x))
-2. Dark channel prior statistics for haze-free images
-3. Transmission estimation via normalized dark channel
-4. Edge-aware refinement (guided filter approximation to soft matting)
-5. Scene radiance recovery with lower-bounded transmission
-6. Optional depth-map recovery using t(x) = exp(-β d(x))
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -27,7 +12,6 @@ EXPOSURE_GAIN = 1.3
 APPLY_SHARPEN = False  
 
 def _ensure_float_image(image: np.ndarray) -> np.ndarray:
-    """Return float32 BGR image in [0, 1]."""
     if image.dtype == np.uint8:
         return image.astype(np.float32) / 255.0
     if np.issubdtype(image.dtype, np.floating):
@@ -88,11 +72,6 @@ class DarkChannelPriorDehazer:
     def _estimate_atmospheric_light(
         self, image: np.ndarray, dark_channel: np.ndarray
     ) -> np.ndarray:
-        """Select brightest input pixel among top dark-channel candidates.
-        
-        Uses max-channel brightness metric (more conservative than sum) to avoid
-        picking colored bright objects, reducing color cast.
-        """
         flat_dark = dark_channel.ravel()
         num_pixels = flat_dark.size
         num_top = max(int(num_pixels * self.top_percent), 1)
