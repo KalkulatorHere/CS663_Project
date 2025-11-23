@@ -22,14 +22,9 @@ from typing import Tuple
 
 import cv2
 import numpy as np
-
-# ---------------------------------------------------------------------------
-# Display/post-processing tuning knobs
-# Edit the constants below to adjust brightness and sharpness everywhere.
-# ---------------------------------------------------------------------------
-GAMMA = 0.85       # >1.0 brightens mid-tones, <1.0 darkens
-EXPOSURE_GAIN = 1.3  # Multiplier applied before gamma
-APPLY_SHARPEN = False  # Enable unsharp masking post-process
+GAMMA = 0.85       
+EXPOSURE_GAIN = 1.3  
+APPLY_SHARPEN = False  
 
 def _ensure_float_image(image: np.ndarray) -> np.ndarray:
     """Return float32 BGR image in [0, 1]."""
@@ -47,8 +42,6 @@ def _guided_filter(
     radius: int,
     eps: float,
 ) -> np.ndarray:
-    """Edge-aware smoothing (guided filter) approximation to soft matting."""
-    # convert to float32
     guide = guide.astype(np.float32)
     src = src.astype(np.float32)
 
@@ -72,17 +65,14 @@ def _guided_filter(
 @dataclass
 class DarkChannelPriorDehazer:
     patch_size: int = 15
-    omega: float = 0.95  # Improved default: stronger haze removal
-    transmission_floor: float = 0.06  # Improved default: more aggressive dehazing
+    omega: float = 0.95 
+    transmission_floor: float = 0.06 
     top_percent: float = 0.001
-    guided_radius: int = 12  # Improved default: smaller window for less blur
+    guided_radius: int = 12 
     guided_eps: float = 1e-3
     depth_beta: float = 1.0
-    # Refinement method: True = per-channel (better edges), False = grayscale (faster)
     use_perchannel_refinement: bool = True
-    # White balance: apply Gray-World to reduce color cast
     apply_gray_world: bool = True
-    # Post-processing parameters for brightness/sharpness (edit constants above)
     gamma: float = GAMMA
     exposure_gain: float = EXPOSURE_GAIN
     apply_sharpen: bool = APPLY_SHARPEN
@@ -109,11 +99,9 @@ class DarkChannelPriorDehazer:
         top_indices = np.argpartition(flat_dark, -num_top)[-num_top:]
         flat_image = image.reshape(-1, 3)
         candidate_pixels = flat_image[top_indices]
-        # Conservative brightness metric: max channel (prevents picking colored objects)
         brightness = candidate_pixels.max(axis=1)
         best_idx = top_indices[np.argmax(brightness)]
         A = flat_image[best_idx].astype(np.float32)
-        # Clamp to avoid divide-by-zero in transmission estimation
         return np.maximum(A, 1e-6)
 
     def _estimate_transmission(
@@ -128,7 +116,6 @@ class DarkChannelPriorDehazer:
     def _refine_transmission(
         self, image: np.ndarray, coarse_t: np.ndarray
     ) -> np.ndarray:
-        """Refine transmission using guided filtering (grayscale guide)."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         refined = _guided_filter(
             gray, coarse_t, self.guided_radius, self.guided_eps
@@ -138,12 +125,7 @@ class DarkChannelPriorDehazer:
     def _refine_transmission_perchannel(
         self, image: np.ndarray, coarse_t: np.ndarray
     ) -> np.ndarray:
-        """Refine transmission using per-channel guided filtering.
-        
-        Uses each color channel as a guide and averages the results.
-        Preserves chromatic edges better than grayscale guide, but may
-        introduce slight color noise/mottling.
-        """
+
         refined_sum = np.zeros_like(coarse_t, dtype=np.float32)
         for c in range(3):
             guide = image[:, :, c].astype(np.float32)
@@ -168,33 +150,23 @@ class DarkChannelPriorDehazer:
         return depth_norm
 
     def _gray_world_balance(self, image: np.ndarray) -> np.ndarray:
-        """Apply Gray-World white balance to reduce residual color cast.
-        
-        Assumes average color should be neutral gray, scales channels accordingly.
-        """
+
         avg = image.mean(axis=(0, 1))
         scale = avg.mean() / (avg + 1e-8)
         return np.clip(image * scale, 0.0, 1.0)
 
     def _apply_post_processing(self, image: np.ndarray) -> np.ndarray:
-        """Apply gamma correction, exposure adjustment, and optional sharpening."""
         result = image.copy()
         
-        # Exposure gain (brightness multiplier)
         if self.exposure_gain != 1.0:
             result = result * self.exposure_gain
         
-        # Gamma correction
         if self.gamma != 1.0:
             result = np.power(np.clip(result, 0.0, 1.0), 1.0 / self.gamma)
         
-        # Unsharp masking for sharpness (optional)
         if self.apply_sharpen:
-            # Convert to uint8 for OpenCV operations
             img_8bit = np.clip(result * 255.0, 0, 255).astype(np.uint8)
-            # Gaussian blur for unsharp mask
             blurred = cv2.GaussianBlur(img_8bit, (0, 0), 1.0)
-            # Unsharp mask: original + (original - blurred) * amount
             sharpened = cv2.addWeighted(img_8bit, 1.5, blurred, -0.5, 0)
             result = sharpened.astype(np.float32) / 255.0
         
@@ -208,7 +180,6 @@ class DarkChannelPriorDehazer:
         atmospheric_light = self._estimate_atmospheric_light(image, dark)
         coarse_transmission = self._estimate_transmission(image, atmospheric_light)
         
-        # Use per-channel refinement if enabled (better edge preservation)
         if self.use_perchannel_refinement:
             refined_transmission = self._refine_transmission_perchannel(image, coarse_transmission)
         else:
@@ -216,11 +187,9 @@ class DarkChannelPriorDehazer:
         
         recovered = self._recover_radiance(image, refined_transmission, atmospheric_light)
         
-        # Apply Gray-World white balance to reduce color cast
         if self.apply_gray_world:
             recovered = self._gray_world_balance(recovered)
         
-        # Apply post-processing (gamma, exposure, sharpening)
         recovered = self._apply_post_processing(recovered)
         
         depth = self._estimate_depth(refined_transmission)

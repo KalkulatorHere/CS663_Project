@@ -1,4 +1,4 @@
-# Parameter Tuning Guide for Dark Channel Prior Dehazing
+# Parameter Tuning Guide for Dark Channel Prior Dehazing 
 
 This guide explains which parameters to adjust to fix **lighting issues** and **blur** in dehazed outputs.  
 All appearance-related knobs live directly inside `dark_channel_prior.py` (see the `GAMMA`, `EXPOSURE_GAIN`, and `APPLY_SHARPEN` constants and the `DarkChannelPriorDehazer` defaults).  
@@ -6,7 +6,7 @@ Edit those values inside the Python file to change global behavior—no CLI flag
 
 ## Quick Fixes for Common Issues
 
-### 🔆 **LOW LIGHTING / DARK OUTPUTS**
+### **LOW LIGHTING / DARK OUTPUTS**
 
 **Primary parameters to adjust:**
 

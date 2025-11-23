@@ -1,19 +1,3 @@
-"""Batch evaluator for the Dark Channel Prior dehazer on the Kaggle hazing dataset.
-
-Usage:
-    python main.py --hazy_dir path/to/dataset/HazyImages \
-                   --output_dir outputs/kaggle \
-                   --gt_dir path/to/dataset/ClearImages
-
-Naming convention:
-    - Hazy images: XX_hazy.png
-    - Ground truth: XX_GT.png
-
-All dehazed results are written under --output_dir using the same relative
-structure as the hazy inputs. If --gt_dir is provided, the code automatically
-converts hazy filenames to GT filenames and reports PSNR/SSIM per image in a CSV.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -94,28 +78,19 @@ def load_image(path: Path) -> np.ndarray:
 
 
 def hazy_to_gt_path(hazy_path: Path, hazy_dir: Path, gt_dir: Path) -> Path:
-    """Convert hazy filename (XX_hazy.png) to ground truth filename (XX_GT.png).
-    
-    Preserves relative directory structure from hazy_dir to gt_dir.
-    """
-    # Get relative path from hazy_dir
     rel_path = hazy_path.relative_to(hazy_dir)
     
-    # Replace _hazy with _GT in the filename
     if "_hazy" in rel_path.name:
         gt_name = rel_path.name.replace("_hazy", "_GT")
     else:
-        # Fallback: if pattern doesn't match, try to construct from stem
         gt_name = rel_path.stem.replace("_hazy", "_GT") + rel_path.suffix
     
-    # Preserve relative directory structure
     return gt_dir / rel_path.parent / gt_name
 
 
 def compute_metrics(
     dehazed: np.ndarray, gt: np.ndarray
 ) -> Tuple[float, float]:
-    """Return PSNR and SSIM in [float, float]."""
     dehazed = _ensure_float_image(cv2.cvtColor(dehazed, cv2.COLOR_BGR2RGB))
     gt = _ensure_float_image(cv2.cvtColor(gt, cv2.COLOR_BGR2RGB))
     if dehazed.shape != gt.shape:
